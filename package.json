@@ -1,0 +1,166 @@
+{
+  "name": "claude-explain",
+  "displayName": "Claude Explain",
+  "description": "Select code, press Ctrl+Shift+E, and get an inline explanation from Claude right under the selection.",
+  "version": "0.1.0",
+  "publisher": "anujsinha13",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anujsinha13/claude-explain"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "anthropic",
+    "explain",
+    "code explanation",
+    "ai"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeExplain.explain",
+        "title": "Explain Selection with Claude",
+        "category": "Claude Explain"
+      },
+      {
+        "command": "claudeExplain.setApiKey",
+        "title": "Set Anthropic API Key",
+        "category": "Claude Explain"
+      },
+      {
+        "command": "claudeExplain.clearApiKey",
+        "title": "Clear Stored Anthropic API Key",
+        "category": "Claude Explain"
+      },
+      {
+        "command": "claudeExplain.closeAll",
+        "title": "Close All Explanations",
+        "category": "Claude Explain"
+      },
+      {
+        "command": "claudeExplain.reply",
+        "title": "Ask",
+        "enablement": "!commentIsEmpty"
+      },
+      {
+        "command": "claudeExplain.copy",
+        "title": "Copy Explanation",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claudeExplain.closeThread",
+        "title": "Close",
+        "icon": "$(close)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "claudeExplain.explain",
+        "key": "ctrl+shift+e",
+        "mac": "ctrl+shift+e",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "claudeExplain.explain",
+          "when": "editorHasSelection",
+          "group": "navigation@1"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "claudeExplain.reply",
+          "group": "inline",
+          "when": "commentController == claudeExplain"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "claudeExplain.copy",
+          "group": "navigation@1",
+          "when": "commentController == claudeExplain"
+        },
+        {
+          "command": "claudeExplain.closeThread",
+          "group": "navigation@2",
+          "when": "commentController == claudeExplain"
+        }
+      ],
+      "commandPalette": [
+        { "command": "claudeExplain.reply", "when": "false" },
+        { "command": "claudeExplain.copy", "when": "false" },
+        { "command": "claudeExplain.closeThread", "when": "false" }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Explain",
+      "properties": {
+        "claudeExplain.model": {
+          "type": "string",
+          "default": "claude-opus-5",
+          "description": "Anthropic model ID used for explanations."
+        },
+        "claudeExplain.effort": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "xhigh", "max"],
+          "default": "medium",
+          "description": "Reasoning effort. Lower is faster and cheaper; raise it for gnarly code."
+        },
+        "claudeExplain.contextLines": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "description": "Lines of surrounding code sent alongside the selection when the file is too large to send whole."
+        },
+        "claudeExplain.maxWholeFileChars": {
+          "type": "number",
+          "default": 24000,
+          "minimum": 0,
+          "description": "Files up to this many characters are sent in full for context. Larger files send only the surrounding lines."
+        },
+        "claudeExplain.style": {
+          "type": "string",
+          "enum": ["concise", "detailed", "eli5"],
+          "default": "concise",
+          "description": "How the explanation is written. 'concise' is a short digest, 'detailed' walks through the logic, 'eli5' assumes no prior knowledge."
+        },
+        "claudeExplain.extraInstructions": {
+          "type": "string",
+          "default": "",
+          "description": "Optional extra instructions appended to the system prompt (e.g. 'Answer in Spanish')."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit",
+    "vscode:prepublish": "npm run check && npm run build -- --production",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0"
+  }
+}
