@@ -1,27 +1,17 @@
 import * as vscode from "vscode";
 import Anthropic from "@anthropic-ai/sdk";
 
-const SECRET_KEY = "claudeExplain.anthropicApiKey";
+const SECRET_KEY = "explainThis.anthropicApiKey";
 
 /**
  * Resolves an Anthropic client. Order of preference:
- *   1. Key stored in VS Code SecretStorage (set via "Claude Explain: Set Anthropic API Key")
- *   2. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / `ant auth login` profile, resolved by the SDK
- *   3. Prompt the user for a key and store it.
+ *   1. Key stored in VS Code SecretStorage (set via "Explain This: Set Anthropic API Key")
+ *   2. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / `ant auth login` profile, resolved lazily by the SDK
+ * If neither exists the SDK throws on the first request; the caller then prompts for a key and retries.
  */
-export async function getClient(secrets: vscode.SecretStorage): Promise<Anthropic | undefined> {
+export async function getClient(secrets: vscode.SecretStorage): Promise<Anthropic> {
   const stored = await secrets.get(SECRET_KEY);
-  if (stored) {
-    return new Anthropic({ apiKey: stored });
-  }
-  try {
-    // Zero-arg constructor resolves env vars and the ant CLI profile.
-    return new Anthropic();
-  } catch {
-    // No ambient credentials; fall through to prompting.
-  }
-  const key = await promptForKey(secrets);
-  return key ? new Anthropic({ apiKey: key }) : undefined;
+  return stored ? new Anthropic({ apiKey: stored }) : new Anthropic();
 }
 
 export async function promptForKey(secrets: vscode.SecretStorage): Promise<string | undefined> {

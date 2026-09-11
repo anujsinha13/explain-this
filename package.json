@@ -1,14 +1,14 @@
 {
-  "name": "claude-explain",
-  "displayName": "Claude Explain",
-  "description": "Select code, press Ctrl+Shift+E, and get an inline explanation from Claude right under the selection.",
+  "name": "explain-this",
+  "displayName": "Explain This",
+  "description": "Select code or terminal output anywhere, press Ctrl+Shift+E, and get an inline explanation from Claude. Works in VS Code, Cursor, Windsurf, and alongside any coding agent.",
   "version": "0.1.0",
   "publisher": "anujsinha13",
   "license": "MIT",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/anujsinha13/claude-explain"
+    "url": "https://github.com/anujsinha13/explain-this"
   },
   "engines": {
     "vscode": "^1.95.0"
@@ -23,6 +23,10 @@
     "anthropic",
     "explain",
     "code explanation",
+    "terminal",
+    "cursor",
+    "codex",
+    "amp",
     "ai"
   ],
   "activationEvents": [],
@@ -30,115 +34,170 @@
   "contributes": {
     "commands": [
       {
-        "command": "claudeExplain.explain",
-        "title": "Explain Selection with Claude",
-        "category": "Claude Explain"
+        "command": "explainThis.explain",
+        "title": "Explain Selection",
+        "category": "Explain This"
       },
       {
-        "command": "claudeExplain.setApiKey",
+        "command": "explainThis.explainInPanel",
+        "title": "Explain Selection in Side Panel",
+        "category": "Explain This"
+      },
+      {
+        "command": "explainThis.explainTerminal",
+        "title": "Explain Terminal Selection",
+        "category": "Explain This"
+      },
+      {
+        "command": "explainThis.setApiKey",
         "title": "Set Anthropic API Key",
-        "category": "Claude Explain"
+        "category": "Explain This"
       },
       {
-        "command": "claudeExplain.clearApiKey",
+        "command": "explainThis.clearApiKey",
         "title": "Clear Stored Anthropic API Key",
-        "category": "Claude Explain"
+        "category": "Explain This"
       },
       {
-        "command": "claudeExplain.closeAll",
-        "title": "Close All Explanations",
-        "category": "Claude Explain"
+        "command": "explainThis.closeAll",
+        "title": "Close All Inline Explanations",
+        "category": "Explain This"
       },
       {
-        "command": "claudeExplain.reply",
+        "command": "explainThis.reply",
         "title": "Ask",
         "enablement": "!commentIsEmpty"
       },
       {
-        "command": "claudeExplain.copy",
+        "command": "explainThis.copy",
         "title": "Copy Explanation",
         "icon": "$(copy)"
       },
       {
-        "command": "claudeExplain.closeThread",
+        "command": "explainThis.closeThread",
         "title": "Close",
         "icon": "$(close)"
       }
     ],
     "keybindings": [
       {
-        "command": "claudeExplain.explain",
+        "command": "explainThis.explain",
         "key": "ctrl+shift+e",
         "mac": "ctrl+shift+e",
         "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "explainThis.explainTerminal",
+        "key": "ctrl+shift+e",
+        "mac": "ctrl+shift+e",
+        "when": "terminalFocus && terminalTextSelected"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "claudeExplain.explain",
+          "command": "explainThis.explain",
           "when": "editorHasSelection",
           "group": "navigation@1"
         }
       ],
       "comments/commentThread/context": [
         {
-          "command": "claudeExplain.reply",
+          "command": "explainThis.reply",
           "group": "inline",
-          "when": "commentController == claudeExplain"
+          "when": "commentController == explainThis"
         }
       ],
       "comments/commentThread/title": [
         {
-          "command": "claudeExplain.copy",
+          "command": "explainThis.copy",
           "group": "navigation@1",
-          "when": "commentController == claudeExplain"
+          "when": "commentController == explainThis"
         },
         {
-          "command": "claudeExplain.closeThread",
+          "command": "explainThis.closeThread",
           "group": "navigation@2",
-          "when": "commentController == claudeExplain"
+          "when": "commentController == explainThis"
         }
       ],
       "commandPalette": [
-        { "command": "claudeExplain.reply", "when": "false" },
-        { "command": "claudeExplain.copy", "when": "false" },
-        { "command": "claudeExplain.closeThread", "when": "false" }
+        {
+          "command": "explainThis.reply",
+          "when": "false"
+        },
+        {
+          "command": "explainThis.copy",
+          "when": "false"
+        },
+        {
+          "command": "explainThis.closeThread",
+          "when": "false"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "explainThis.explainTerminal",
+          "when": "terminalTextSelected",
+          "group": "navigation@1"
+        }
       ]
     },
     "configuration": {
-      "title": "Claude Explain",
+      "title": "Explain This",
       "properties": {
-        "claudeExplain.model": {
+        "explainThis.display": {
+          "type": "string",
+          "enum": [
+            "inline",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "A card directly under the selected code (comment thread).",
+            "The Explain This side panel."
+          ],
+          "default": "inline",
+          "description": "Where editor explanations appear. Terminal explanations always use the side panel."
+        },
+        "explainThis.model": {
           "type": "string",
           "default": "claude-opus-5",
           "description": "Anthropic model ID used for explanations."
         },
-        "claudeExplain.effort": {
+        "explainThis.effort": {
           "type": "string",
-          "enum": ["low", "medium", "high", "xhigh", "max"],
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "default": "medium",
           "description": "Reasoning effort. Lower is faster and cheaper; raise it for gnarly code."
         },
-        "claudeExplain.contextLines": {
+        "explainThis.contextLines": {
           "type": "number",
           "default": 60,
           "minimum": 0,
           "description": "Lines of surrounding code sent alongside the selection when the file is too large to send whole."
         },
-        "claudeExplain.maxWholeFileChars": {
+        "explainThis.maxWholeFileChars": {
           "type": "number",
           "default": 24000,
           "minimum": 0,
           "description": "Files up to this many characters are sent in full for context. Larger files send only the surrounding lines."
         },
-        "claudeExplain.style": {
+        "explainThis.style": {
           "type": "string",
-          "enum": ["concise", "detailed", "eli5"],
+          "enum": [
+            "concise",
+            "detailed",
+            "eli5"
+          ],
           "default": "concise",
           "description": "How the explanation is written. 'concise' is a short digest, 'detailed' walks through the logic, 'eli5' assumes no prior knowledge."
         },
-        "claudeExplain.extraInstructions": {
+        "explainThis.extraInstructions": {
           "type": "string",
           "default": "",
           "description": "Optional extra instructions appended to the system prompt (e.g. 'Answer in Spanish')."
@@ -161,6 +220,10 @@
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.125.0"
+    "@anthropic-ai/sdk": "^0.125.0",
+    "marked": "^16.4.2"
+  },
+  "bin": {
+    "explain-this": "./dist/cli.js"
   }
 }

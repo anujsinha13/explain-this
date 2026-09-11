@@ -6,3 +6,6 @@ tsconfig.json
 *.vsix
 .gitignore
 **/*.map
+dist/cli.js
+dist/cli.js.map
+system/**

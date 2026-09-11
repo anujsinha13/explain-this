@@ -62,8 +62,31 @@ export async function streamExplanation(opts: StreamOptions): Promise<StreamResu
   };
 }
 
+/**
+ * The SDK resolves credentials lazily and throws a plain Error (not a typed
+ * subclass) on the first request when none can be found.
+ */
+export function isMissingCredentials(err: unknown): boolean {
+  return err instanceof Error && !(err instanceof Anthropic.APIError) && err.message.startsWith("Could not resolve authentication method");
+}
+
+export interface ErrorInfo {
+  message: string;
+  /** The key is wrong or absent; offer to (re)enter it. */
+  authProblem: boolean;
+  /** No credentials at all were found. */
+  missingKey: boolean;
+}
+
 /** Turns an SDK error into a short, user-facing message. */
-export function describeError(err: unknown): { message: string; authProblem: boolean } {
+export function describeError(err: unknown): ErrorInfo {
+  return { missingKey: isMissingCredentials(err), ...describe(err) };
+}
+
+function describe(err: unknown): { message: string; authProblem: boolean } {
+  if (isMissingCredentials(err)) {
+    return { message: "No Anthropic API key found.", authProblem: true };
+  }
   if (err instanceof Anthropic.AuthenticationError) {
     return { message: "Anthropic rejected the API key.", authProblem: true };
   }
@@ -74,7 +97,7 @@ export function describeError(err: unknown): { message: string; authProblem: boo
     return { message: "Rate limited by Anthropic. Try again in a moment.", authProblem: false };
   }
   if (err instanceof Anthropic.NotFoundError) {
-    return { message: `Model not found. Check the claudeExplain.model setting. (${err.message})`, authProblem: false };
+    return { message: `Model not found. Check the explainThis.model setting. (${err.message})`, authProblem: false };
   }
   if (err instanceof Anthropic.BadRequestError) {
     return { message: `Anthropic rejected the request: ${err.message}`, authProblem: false };

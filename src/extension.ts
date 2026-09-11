@@ -1,37 +1,48 @@
 import * as vscode from "vscode";
 import { getClient, promptForKey, clearKey } from "./apiKey";
 import { streamExplanation, describeError, Effort } from "./client";
-import { buildSystemPrompt, buildSelectionContext, Style } from "./prompt";
-import { ExplanationThreads } from "./threads";
+import { buildSystemPrompt, Style } from "./prompt";
+import { fromEditor, fromTerminal, EditorSelection } from "./editorContext";
+import { InlineThreads } from "./inline";
+import { ExplainPanel } from "./panel";
+import { Surface, StreamingTarget } from "./surface";
 
-let threads: ExplanationThreads;
+let inline: InlineThreads;
+let panel: ExplainPanel;
 
 export function activate(context: vscode.ExtensionContext): void {
-  threads = new ExplanationThreads();
-  context.subscriptions.push(threads);
+  inline = new InlineThreads();
+  panel = new ExplainPanel(context.extensionUri);
+  panel.setAskHandler((surface, text) => void followUp(context, surface, text));
+  context.subscriptions.push(inline, panel);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeExplain.explain", () => explainSelection(context)),
-    vscode.commands.registerCommand("claudeExplain.reply", (reply: vscode.CommentReply) =>
-      followUp(context, reply),
-    ),
-    vscode.commands.registerCommand("claudeExplain.copy", async (thread: vscode.CommentThread) => {
-      const text = threads.get(thread)?.lastExplanation;
+    vscode.commands.registerCommand("explainThis.explain", () => explainEditor(context)),
+    vscode.commands.registerCommand("explainThis.explainTerminal", () => explainTerminal(context)),
+    vscode.commands.registerCommand("explainThis.explainInPanel", () => explainEditor(context, "panel")),
+    vscode.commands.registerCommand("explainThis.reply", (reply: vscode.CommentReply) => {
+      const surface = inline.get(reply.thread);
+      if (surface) {
+        void followUp(context, surface, reply.text);
+      }
+    }),
+    vscode.commands.registerCommand("explainThis.copy", async (thread: vscode.CommentThread) => {
+      const text = inline.get(thread)?.conversation.lastExplanation;
       if (text) {
         await vscode.env.clipboard.writeText(text);
         vscode.window.setStatusBarMessage("Explanation copied", 2000);
       }
     }),
-    vscode.commands.registerCommand("claudeExplain.closeThread", (thread: vscode.CommentThread) =>
-      threads.close(thread),
+    vscode.commands.registerCommand("explainThis.closeThread", (thread: vscode.CommentThread) =>
+      inline.close(thread),
     ),
-    vscode.commands.registerCommand("claudeExplain.closeAll", () => threads.closeAll()),
-    vscode.commands.registerCommand("claudeExplain.setApiKey", async () => {
+    vscode.commands.registerCommand("explainThis.closeAll", () => inline.closeAll()),
+    vscode.commands.registerCommand("explainThis.setApiKey", async () => {
       if (await promptForKey(context.secrets)) {
         vscode.window.showInformationMessage("Anthropic API key saved.");
       }
     }),
-    vscode.commands.registerCommand("claudeExplain.clearApiKey", async () => {
+    vscode.commands.registerCommand("explainThis.clearApiKey", async () => {
       await clearKey(context.secrets);
       vscode.window.showInformationMessage("Stored Anthropic API key removed.");
     }),
@@ -39,7 +50,8 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  threads?.dispose();
+  inline?.dispose();
+  panel?.dispose();
 }
 
 interface Settings {
@@ -49,10 +61,11 @@ interface Settings {
   maxWholeFileChars: number;
   style: Style;
   extraInstructions: string;
+  display: "inline" | "panel";
 }
 
 function readSettings(): Settings {
-  const cfg = vscode.workspace.getConfiguration("claudeExplain");
+  const cfg = vscode.workspace.getConfiguration("explainThis");
   return {
     model: cfg.get<string>("model", "claude-opus-5"),
     effort: cfg.get<Effort>("effort", "medium"),
@@ -60,13 +73,18 @@ function readSettings(): Settings {
     maxWholeFileChars: cfg.get<number>("maxWholeFileChars", 24000),
     style: cfg.get<Style>("style", "concise"),
     extraInstructions: cfg.get<string>("extraInstructions", ""),
+    display: cfg.get<"inline" | "panel">("display", "inline"),
   };
 }
 
-async function explainSelection(context: vscode.ExtensionContext): Promise<void> {
+/** Explains the editor selection. Falls back to the terminal when no editor is active. */
+async function explainEditor(context: vscode.ExtensionContext, forceDisplay?: "inline" | "panel"): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showWarningMessage("Open a file and select some code first.");
+    if (vscode.window.activeTerminal) {
+      return explainTerminal(context);
+    }
+    vscode.window.showWarningMessage("Select some code or terminal output first.");
     return;
   }
 
@@ -81,53 +99,69 @@ async function explainSelection(context: vscode.ExtensionContext): Promise<void>
   }
 
   const settings = readSettings();
-  const ctx = buildSelectionContext(editor.document, range, settings);
-  const label =
-    ctx.startLine === ctx.endLine ? `Line ${ctx.startLine}` : `Lines ${ctx.startLine}-${ctx.endLine}`;
+  const sel = fromEditor(editor.document, range, settings);
+  const display = forceDisplay ?? settings.display;
 
-  const thread = threads.create(editor.document.uri, range, label);
-  const state = threads.get(thread)!;
-  state.history.push({ role: "user", content: ctx.userMessage });
+  const surface: Surface =
+    display === "panel"
+      ? panel.show(sel.label, sel.input.selected)
+      : inline.create(editor.document.uri, range, sel.label);
 
-  await runTurn(context, thread, settings);
+  await start(context, surface, sel, settings);
 }
 
-async function followUp(context: vscode.ExtensionContext, reply: vscode.CommentReply): Promise<void> {
-  const thread = reply.thread;
-  const state = threads.get(thread);
-  const question = reply.text.trim();
-  if (!state || !question) {
+/** Explains the text selected in the integrated terminal, shown in the side panel. */
+async function explainTerminal(context: vscode.ExtensionContext): Promise<void> {
+  const sel = await fromTerminal();
+  if (!sel) {
+    vscode.window.showWarningMessage("Select some text in the terminal first.");
     return;
   }
-  if (state.abort) {
+  const settings = readSettings();
+  const surface = panel.show(sel.label, sel.input.selected);
+  await start(context, surface, sel, settings);
+}
+
+async function start(
+  context: vscode.ExtensionContext,
+  surface: Surface,
+  sel: EditorSelection,
+  settings: Settings,
+): Promise<void> {
+  surface.conversation.history.push({ role: "user", content: sel.userMessage });
+  await runTurn(context, surface, settings);
+}
+
+async function followUp(context: vscode.ExtensionContext, surface: Surface, text: string): Promise<void> {
+  const question = text.trim();
+  if (!question) {
+    return;
+  }
+  if (surface.conversation.abort) {
     vscode.window.showInformationMessage("Claude is still answering. Wait for it to finish.");
     return;
   }
-  threads.addUserComment(thread, question);
-  state.history.push({ role: "user", content: question });
-  await runTurn(context, thread, readSettings());
+  surface.addUserTurn(question);
+  surface.conversation.history.push({ role: "user", content: question });
+  await runTurn(context, surface, readSettings());
 }
 
-/** Sends the thread's history to Claude and streams the reply into a new comment. */
+/**
+ * Sends the conversation to Claude and streams the reply into the surface.
+ * `retry` carries the existing target when re-running after the user enters an API key.
+ */
 async function runTurn(
   context: vscode.ExtensionContext,
-  thread: vscode.CommentThread,
+  surface: Surface,
   settings: Settings,
+  retry?: { target: StreamingTarget },
 ): Promise<void> {
-  const state = threads.get(thread);
-  if (!state) {
-    return;
-  }
-
+  const conversation = surface.conversation;
   const client = await getClient(context.secrets);
-  if (!client) {
-    threads.close(thread);
-    return;
-  }
 
   const abort = new AbortController();
-  state.abort = abort;
-  const comment = threads.startStreamingComment(thread);
+  conversation.abort = abort;
+  const target = retry?.target ?? surface.beginAssistantTurn();
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: "Claude is explaining…", cancellable: true },
@@ -139,42 +173,47 @@ async function runTurn(
           model: settings.model,
           effort: settings.effort,
           system: buildSystemPrompt(settings.style, settings.extraInstructions),
-          messages: state.history,
+          messages: conversation.history,
           signal: abort.signal,
-          onText: (delta) => comment.append(delta),
+          onText: (delta) => target.append(delta),
         });
 
         if (result.stopReason === "refusal") {
-          comment.fail(
-            `Claude declined to answer${result.refusalExplanation ? `: ${result.refusalExplanation}` : "."}`,
-          );
-          state.history.pop(); // drop the unanswered user turn so a follow-up still works
+          target.fail(`Claude declined to answer${result.refusalExplanation ? `: ${result.refusalExplanation}` : "."}`);
+          conversation.history.pop(); // drop the unanswered user turn so a follow-up still works
           return;
         }
 
         const text = result.text.trim() || "_(empty response)_";
-        state.history.push({ role: "assistant", content: text });
-        state.lastExplanation = text;
-        comment.finish(text, result.servedBy !== settings.model ? `via ${result.servedBy}` : undefined);
+        conversation.history.push({ role: "assistant", content: text });
+        conversation.lastExplanation = text;
+        target.finish(text, result.servedBy !== settings.model ? `via ${result.servedBy}` : undefined);
       } catch (err) {
         if (abort.signal.aborted) {
-          comment.fail("Cancelled.");
-          state.history.pop();
+          conversation.history.pop();
+          target.fail("Cancelled.");
           return;
         }
-        const { message, authProblem } = describeError(err);
-        comment.fail(message);
-        state.history.pop();
+        const { message, authProblem, missingKey } = describeError(err);
+        if (missingKey && !retry) {
+          // First run with no credentials anywhere: ask for a key and retry into the same card.
+          conversation.abort = undefined;
+          if (await promptForKey(context.secrets)) {
+            return runTurn(context, surface, settings, { target });
+          }
+        }
+        conversation.history.pop();
+        target.fail(message);
         if (authProblem) {
-          const pick = await vscode.window.showErrorMessage(message, "Set API key");
+          const pick = await vscode.window.showErrorMessage(`Explain This: ${message}`, "Set API key");
           if (pick === "Set API key") {
             await promptForKey(context.secrets);
           }
         } else {
-          vscode.window.showErrorMessage(`Claude Explain: ${message}`);
+          vscode.window.showErrorMessage(`Explain This: ${message}`);
         }
       } finally {
-        state.abort = undefined;
+        conversation.abort = undefined;
       }
     },
   );
