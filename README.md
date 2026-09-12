@@ -28,6 +28,7 @@ Then give it an Anthropic API key in one of these ways:
 
 - Run **Explain This: Set Anthropic API Key** from the command palette. The key is kept in the editor's secret storage, not in settings.
 - Or export `ANTHROPIC_API_KEY` in the environment the editor is launched from.
+- Or put the key in `~/.config/explain-this/api-key`. The extension, CLI, and Quick Action all read this file, so one setup covers everything.
 - Or log in with the Anthropic CLI (`ant auth login`). The SDK picks up the profile automatically.
 
 ### Use
