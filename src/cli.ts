@@ -6,39 +6,40 @@
  *   explain-this < file.ts       # explains stdin
  *   explain-this --html          # writes a rendered HTML page to a temp file and prints its path
  *   explain-this --bubble        # shows a floating Liquid Glass bubble at the cursor (macOS)
- *   explain-this --style eli5 --effort low --model claude-opus-5
+ *   explain-this --level 7 --effort low --model claude-opus-5   # level 1 = plainest, 10 = most technical
  *
  * API key: ANTHROPIC_API_KEY, or ~/.config/explain-this/api-key, or an `ant auth login` profile.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { marked } from "marked";
 import { streamExplanation, describeError, isMissingCredentials, Effort } from "./client";
-import { buildSystemPrompt, buildUserMessage, Style } from "./prompt";
+import { buildSystemPrompt, buildUserMessage, clampLevel, DEFAULT_LEVEL } from "./prompt";
 import { BubbleSurface, bubbleAvailable } from "./bubble";
 
 interface Args {
   html: boolean;
   open: boolean;
   bubble: boolean;
-  style: Style;
+  level: number;
   effort: Effort;
   model: string;
   source: string;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { html: false, open: false, bubble: false, style: "plain", effort: "medium", model: "claude-opus-5", source: "clipboard" };
+  const args: Args = { html: false, open: false, bubble: false, level: loadConfig().level ?? DEFAULT_LEVEL, effort: "medium", model: "claude-opus-5", source: "clipboard" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i] ?? "";
     if (a === "--html") args.html = true;
     else if (a === "--open") { args.html = true; args.open = true; }
     else if (a === "--bubble") args.bubble = true;
-    else if (a === "--style") args.style = next() as Style;
+    else if (a === "--level") args.level = clampLevel(next());
+    else if (a === "--style") args.level = { plain: 2, eli5: 1, concise: 6, detailed: 7 }[next()] ?? args.level; // old flag
     else if (a === "--effort") args.effort = next() as Effort;
     else if (a === "--model") args.model = next();
     else if (a === "--source") args.source = next();
@@ -54,12 +55,14 @@ function usage(): string {
   return [
     "explain-this: explain selected code or terminal output with Claude.",
     "",
-    "  explain-this [--style plain|concise|detailed|eli5] [--effort low|medium|high|xhigh|max]",
+    "  explain-this [--level 1-10] [--effort low|medium|high|xhigh|max]",
     "               [--model ID] [--source LABEL] [--html] [--open] [--bubble]",
     "",
     "Reads stdin if piped, otherwise the clipboard. --html renders Markdown to a temp",
     "HTML file and prints its path; --open also opens it in the default browser.",
     "--bubble shows a floating glass bubble at the mouse cursor with follow-ups (macOS).",
+    "--level: 1 is the plainest English, 10 the most technical. The bubble's slider",
+    "saves your choice to ~/.config/explain-this/config.json as the new default.",
     "",
   ].join("\n");
 }
@@ -91,6 +94,25 @@ async function readInput(): Promise<{ text: string; source: string }> {
     return { text: execFileSync("powershell", ["-command", "Get-Clipboard"], { encoding: "utf8" }), source: "clipboard" };
   }
   return { text: "", source: "clipboard" };
+}
+
+const CONFIG_FILE = join(homedir(), ".config", "explain-this", "config.json");
+
+function loadConfig(): { level?: number } {
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as { level?: number };
+  } catch {
+    return {};
+  }
+}
+
+function saveConfig(patch: { level?: number }): void {
+  try {
+    mkdirSync(dirname(CONFIG_FILE), { recursive: true });
+    writeFileSync(CONFIG_FILE, JSON.stringify({ ...loadConfig(), ...patch }, null, 2) + "\n");
+  } catch {
+    /* best effort */
+  }
 }
 
 function makeClient(): Anthropic {
@@ -130,7 +152,7 @@ async function main(): Promise<void> {
   const userMessage = buildUserMessage({ selected: text, source: label, language: "unknown (selected outside the editor)" });
 
   const client = makeClient();
-  const system = buildSystemPrompt(args.style, "");
+  const system = buildSystemPrompt(args.level, "");
 
   if (args.bubble) {
     const binary = join(__dirname, "..", "bin", "ExplainBubble");
@@ -195,15 +217,22 @@ async function runBubble(
   label: string,
   selected: string,
   userMessage: string,
-  system: string,
+  _system: string,
 ): Promise<void> {
   let queue: Promise<void> = Promise.resolve();
   let resolveClosed: () => void = () => undefined;
   const closed = new Promise<void>((r) => (resolveClosed = r));
 
-  const surface = new BubbleSurface(binary, label, selected, (event) => {
+  let system = buildSystemPrompt(args.level, "");
+  const surface = new BubbleSurface(binary, label, selected, args.level, (event) => {
     if (event.type === "closed") {
       resolveClosed();
+    } else if (event.type === "level") {
+      const level = clampLevel(event.value);
+      saveConfig({ level });
+      system = buildSystemPrompt(level, "");
+      surface.restart(level);
+      queue = queue.then(() => turn());
     } else {
       queue = queue.then(() => turn(event.text));
     }

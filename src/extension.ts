@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { getClient, promptForKey, clearKey } from "./apiKey";
 import { streamExplanation, describeError, Effort } from "./client";
-import { buildSystemPrompt, Style } from "./prompt";
+import { buildSystemPrompt, clampLevel, DEFAULT_LEVEL } from "./prompt";
 import { fromEditor, fromTerminal, EditorSelection } from "./editorContext";
 import { InlineThreads } from "./inline";
 import { ExplainPanel } from "./panel";
@@ -65,7 +65,7 @@ interface Settings {
   effort: Effort;
   contextLines: number;
   maxWholeFileChars: number;
-  style: Style;
+  level: number;
   extraInstructions: string;
   display: Display;
 }
@@ -79,7 +79,7 @@ function readSettings(): Settings {
     effort: cfg.get<Effort>("effort", "medium"),
     contextLines: cfg.get<number>("contextLines", 60),
     maxWholeFileChars: cfg.get<number>("maxWholeFileChars", 24000),
-    style: cfg.get<Style>("style", "plain"),
+    level: clampLevel(cfg.get<number>("level", DEFAULT_LEVEL)),
     extraInstructions: cfg.get<string>("extraInstructions", ""),
     display: cfg.get<Display>("display", "bubble"),
   };
@@ -88,9 +88,11 @@ function readSettings(): Settings {
 /** Opens a floating bubble for this selection, replacing any bubble already open. */
 function openBubble(context: vscode.ExtensionContext, label: string, selected: string): BubbleSurface {
   bubble?.close();
-  const surface = new BubbleSurface(bubbleBinary, label, selected, (event) => {
+  const surface = new BubbleSurface(bubbleBinary, label, selected, readSettings().level, (event) => {
     if (event.type === "ask") {
       void followUp(context, surface, event.text);
+    } else if (event.type === "level") {
+      void changeLevel(context, surface, event.value);
     } else if (bubble === surface) {
       bubble = undefined;
     }
@@ -162,6 +164,14 @@ async function start(
   await runTurn(context, surface, settings);
 }
 
+/** Re-explains the same selection at a new technicality level and remembers the level. */
+async function changeLevel(context: vscode.ExtensionContext, surface: BubbleSurface, value: number): Promise<void> {
+  const level = clampLevel(value);
+  await vscode.workspace.getConfiguration("explainThis").update("level", level, vscode.ConfigurationTarget.Global);
+  surface.restart(level);
+  await runTurn(context, surface, { ...readSettings(), level });
+}
+
 async function followUp(context: vscode.ExtensionContext, surface: Surface, text: string): Promise<void> {
   const question = text.trim();
   if (!question) {
@@ -202,7 +212,7 @@ async function runTurn(
           client,
           model: settings.model,
           effort: settings.effort,
-          system: buildSystemPrompt(settings.style, settings.extraInstructions),
+          system: buildSystemPrompt(settings.level, settings.extraInstructions),
           messages: conversation.history,
           signal: abort.signal,
           onText: (delta) => target.append(delta),

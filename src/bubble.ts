@@ -4,7 +4,7 @@ import * as readline from "node:readline";
 import { Conversation, newConversation, StreamingTarget, Surface } from "./surface";
 
 /** Messages the bubble sends back over stdout. */
-export type BubbleEvent = { type: "ask"; text: string } | { type: "closed" };
+export type BubbleEvent = { type: "ask"; text: string } | { type: "level"; value: number } | { type: "closed" };
 
 export function bubbleAvailable(binary: string): boolean {
   return process.platform === "darwin" && existsSync(binary);
@@ -19,7 +19,13 @@ export class BubbleSurface implements Surface {
   private readonly proc: ChildProcess;
   private closed = false;
 
-  constructor(binary: string, source: string, selected: string, private readonly onEvent: (e: BubbleEvent) => void) {
+  constructor(
+    binary: string,
+    private readonly source: string,
+    private readonly selected: string,
+    level: number,
+    private readonly onEvent: (e: BubbleEvent) => void,
+  ) {
     try {
       chmodSync(binary, 0o755); // zip-based installs can drop the executable bit
     } catch {
@@ -30,7 +36,7 @@ export class BubbleSurface implements Surface {
     rl.on("line", (line) => {
       try {
         const msg = JSON.parse(line) as BubbleEvent;
-        if (msg.type === "ask") {
+        if (msg.type === "ask" || msg.type === "level") {
           this.onEvent(msg);
         }
       } catch {
@@ -47,7 +53,15 @@ export class BubbleSurface implements Surface {
     this.proc.on("exit", onGone);
     this.proc.on("error", onGone);
     this.proc.stdin?.on("error", () => undefined);
-    this.send({ type: "start", source, selected });
+    this.send({ type: "start", source, selected, level });
+  }
+
+  /** Clears the bubble and starts over at a new technicality level. */
+  restart(level: number): void {
+    this.conversation.abort?.abort();
+    this.conversation.history.length = Math.min(this.conversation.history.length, 1);
+    this.conversation.lastExplanation = "";
+    this.send({ type: "start", source: this.source, selected: this.selected, level });
   }
 
   get isOpen(): boolean {

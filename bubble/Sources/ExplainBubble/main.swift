@@ -2,17 +2,26 @@
 // near the mouse cursor, on top of every other window.
 //
 // Protocol (JSON lines):
-//   stdin  <- {"type":"start","source":"...","selected":"..."}
+//   stdin  <- {"type":"start","source":"...","selected":"...","level":3}   (also used to reset)
 //             {"type":"user","text":"..."}            a follow-up question, echoed by the host
 //             {"type":"begin"}                        a new assistant turn is starting
 //             {"type":"delta","text":"..."}           streamed text
 //             {"type":"done","text":"...","label":"…"} final text (replaces the streamed buffer)
 //             {"type":"error","message":"..."}
 //   stdout -> {"type":"ask","text":"..."}             the user typed a follow-up
+//             {"type":"level","value":7}              the user moved the technicality slider
 //             {"type":"closed"}                       the bubble was dismissed
+//
+// Env: EXPLAIN_BUBBLE_DEBUG=1 logs to stderr; EXPLAIN_BUBBLE_NO_AUTOCLOSE=1 disables click-outside dismissal.
 
 import AppKit
 import SwiftUI
+
+// MARK: - Layout constants
+
+let bubbleWidth: CGFloat = 640
+let bubblePadding: CGFloat = 20
+let bodySize: CGFloat = 16
 
 // MARK: - Model
 
@@ -30,12 +39,22 @@ final class BubbleModel: ObservableObject {
     @Published var selected = ""
     @Published var turns: [Turn] = []
     @Published var streaming = false
-    @Published var hostAlive = true
-    @Published var showSelection = false
+    @Published var hostAlive = true { didSet { onRelayout?() } }
+    @Published var showSelection = false { didSet { onRelayout?() } }
+    @Published var level: Double = 3
+    /// Natural height of the scrolling body, reported by the rendered view itself.
+    @Published var contentHeight: CGFloat = 28
+    /// Tallest the scrolling body may get; computed from the screen at launch.
+    @Published var maxBodyHeight: CGFloat = 560
+
+    var bodyHeight: CGFloat { min(max(contentHeight, 28), maxBodyHeight) }
 
     var onAsk: ((String) -> Void)?
+    var onLevelChange: ((Int) -> Void)?
     var onClose: (() -> Void)?
-    var onLayoutChange: (() -> Void)?
+    var onRelayout: (() -> Void)?
+    /// Called with the bubble's full rendered height whenever it changes.
+    var onHeightChange: ((CGFloat) -> Void)?
 
     var lastAssistantText: String? {
         turns.last(where: { $0.role == .assistant && !$0.isError })?.text
@@ -46,6 +65,7 @@ final class BubbleModel: ObservableObject {
         case "start":
             source = msg["source"] as? String ?? ""
             selected = msg["selected"] as? String ?? ""
+            if let l = msg["level"] as? Double { level = min(10, max(1, l)) }
             turns = []
             streaming = false
         case "user":
@@ -79,24 +99,16 @@ final class BubbleModel: ObservableObject {
         default:
             break
         }
-        onLayoutChange?()
+        onRelayout?()
     }
 }
 
-// MARK: - Markdown (small, block-level renderer on top of AttributedString inline markdown)
+// MARK: - Markdown (small block-level renderer on top of AttributedString inline markdown)
 
-enum MDBlock: Identifiable {
+enum MDBlock {
     case paragraph(String)
     case bullet(String)
     case code(String)
-
-    var id: String {
-        switch self {
-        case .paragraph(let s): return "p" + s
-        case .bullet(let s): return "b" + s
-        case .code(let s): return "c" + s
-        }
-    }
 }
 
 func parseBlocks(_ markdown: String) -> [MDBlock] {
@@ -142,7 +154,7 @@ func parseBlocks(_ markdown: String) -> [MDBlock] {
             continue
         }
         var text = line
-        while text.hasPrefix("#") { text.removeFirst() }  // headings are not requested, but be safe
+        while text.hasPrefix("#") { text.removeFirst() }
         paragraph.append(text.trimmingCharacters(in: .whitespaces))
     }
     if let c = code { blocks.append(.code(c.joined(separator: "\n"))) }
@@ -162,110 +174,86 @@ struct MarkdownText: View {
         let blocks = parseBlocks(text)
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                let isLast = index == blocks.count - 1
+                let cursor = index == blocks.count - 1 && streaming ? " ▍" : ""
                 switch block {
                 case .paragraph(let s):
-                    Text(inline(s + (isLast && streaming ? " ▍" : "")))
+                    Text(inline(s + cursor))
+                        .font(.system(size: bodySize))
+                        .lineSpacing(3)
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 case .bullet(let s):
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("•").foregroundStyle(.secondary)
-                        Text(inline(s + (isLast && streaming ? " ▍" : "")))
+                        Text("•").font(.system(size: bodySize)).foregroundStyle(.secondary)
+                        Text(inline(s + cursor))
+                            .font(.system(size: bodySize))
+                            .lineSpacing(3)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 case .code(let s):
                     Text(s)
-                        .font(.system(.callout, design: .monospaced))
+                        .font(.system(size: bodySize - 2, design: .monospaced))
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
             if blocks.isEmpty && streaming {
-                Text("Thinking…").foregroundStyle(.secondary)
+                Text("Thinking…").font(.system(size: bodySize)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-// MARK: - View
+// MARK: - Height reporting
 
-struct HeightKey: PreferenceKey {
+/// Reads a view's rendered height without affecting its layout.
+struct BodyHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
-struct BubbleView: View {
-    @ObservedObject var model: BubbleModel
-    @State private var question = ""
-    @State private var contentHeight: CGFloat = 0
-    @FocusState private var askFocused: Bool
+struct TotalHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
 
-    private let width: CGFloat = 440
-    private let maxBodyHeight: CGFloat = 460
+extension View {
+    func reportHeight<K: PreferenceKey>(_ key: K.Type, _ action: @escaping (CGFloat) -> Void) -> some View where K.Value == CGFloat {
+        background(GeometryReader { g in Color.clear.preference(key: key, value: g.size.height) })
+            .onPreferenceChange(key) { action($0) }
+    }
+}
+
+// MARK: - Views
+
+/// The scrolling part: selected text (optional) and the conversation turns.
+/// Kept separate so the controller can measure it offscreen at the bubble's width.
+struct BodyContent: View {
+    @ObservedObject var model: BubbleModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if model.showSelection {
-                            Text(model.selected)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-                        }
-                        ForEach(model.turns) { turn in
-                            turnView(turn)
-                        }
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: HeightKey.self, value: g.size.height)
-                    })
-                }
-                .frame(height: min(max(contentHeight, 24), maxBodyHeight))
-                .onPreferenceChange(HeightKey.self) { h in
-                    contentHeight = h
-                    DispatchQueue.main.async { model.onLayoutChange?() }
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            if model.showSelection {
+                Text(model.selected)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             }
-            if model.hostAlive { askField }
+            ForEach(model.turns) { turn in
+                turnView(turn)
+            }
         }
-        .padding(16)
-        .frame(width: width)
-        .modifier(GlassBackground())
-        .onChange(of: model.turns.count) { _, _ in model.onLayoutChange?() }
-    }
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles").foregroundStyle(.secondary)
-            Text(model.source.isEmpty ? "Explain This" : model.source)
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-            Spacer()
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { model.showSelection.toggle() }
-            } label: {
-                Image(systemName: model.showSelection ? "eye.slash" : "eye")
-            }
-            .buttonStyle(.plain).foregroundStyle(.secondary).help("Show the selected text")
-            Button {
-                if let t = model.lastAssistantText {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(t, forType: .string)
-                }
-            } label: { Image(systemName: "doc.on.doc") }
-            .buttonStyle(.plain).foregroundStyle(.secondary).help("Copy explanation")
-            Button { model.onClose?() } label: { Image(systemName: "xmark") }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Close (Esc)")
-                .keyboardShortcut(.cancelAction)
+        .frame(width: bubbleWidth - 2 * bubblePadding, alignment: .leading)
+        .reportHeight(BodyHeightKey.self) { h in
+            if abs(h - model.contentHeight) > 0.5 { model.contentHeight = h }
         }
     }
 
@@ -274,7 +262,9 @@ struct BubbleView: View {
         switch turn.role {
         case .user:
             Text(turn.text)
-                .padding(.horizontal, 10).padding(.vertical, 6)
+                .font(.system(size: bodySize))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12).padding(.vertical, 7)
                 .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
                 .frame(maxWidth: .infinity, alignment: .trailing)
         case .assistant:
@@ -282,9 +272,87 @@ struct BubbleView: View {
                 MarkdownText(text: turn.text, streaming: model.streaming && turn.id == model.turns.last?.id)
                     .foregroundStyle(turn.isError ? Color.red : Color.primary)
                 if let label = turn.label, !label.isEmpty {
-                    Text(label).font(.caption2).foregroundStyle(.tertiary)
+                    Text(label).font(.system(size: 11)).foregroundStyle(.tertiary)
                 }
             }
+        }
+    }
+}
+
+struct BubbleView: View {
+    @ObservedObject var model: BubbleModel
+    @State private var question = ""
+    @State private var levelEmitter: DispatchWorkItem?
+    @FocusState private var askFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            levelRow
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        BodyContent(model: model)
+                        Color.clear.frame(height: 1).id("bottom")
+                    }
+                }
+                .frame(height: model.bodyHeight)
+                .onChange(of: model.contentHeight) { _, _ in
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+            }
+            if model.hostAlive { askField }
+        }
+        .padding(bubblePadding)
+        .frame(width: bubbleWidth)
+        .modifier(GlassBackground())
+        .reportHeight(TotalHeightKey.self) { h in model.onHeightChange?(h) }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles").foregroundStyle(.secondary)
+            Text(model.source.isEmpty ? "Explain This" : model.source)
+                .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { model.showSelection.toggle() }
+            } label: {
+                Image(systemName: model.showSelection ? "eye.slash" : "eye").font(.system(size: 15))
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary).help("Show the selected text")
+            Button {
+                if let t = model.lastAssistantText {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(t, forType: .string)
+                }
+            } label: { Image(systemName: "doc.on.doc").font(.system(size: 15)) }
+            .buttonStyle(.plain).foregroundStyle(.secondary).help("Copy explanation")
+            Button { model.onClose?() } label: { Image(systemName: "xmark").font(.system(size: 15, weight: .medium)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary).help("Close (Esc)")
+                .keyboardShortcut(.cancelAction)
+        }
+    }
+
+    private var levelRow: some View {
+        HStack(spacing: 10) {
+            Text("Plain").font(.system(size: 12)).foregroundStyle(.secondary)
+            Slider(value: $model.level, in: 1...10, step: 1)
+                .controlSize(.small)
+            Text("Technical").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("\(Int(model.level))")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 22)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.08), in: Capsule())
+        }
+        .onChange(of: model.level) { _, newValue in
+            // Wait for the drag to settle, then ask the host to re-explain at this level.
+            levelEmitter?.cancel()
+            let item = DispatchWorkItem { model.onLevelChange?(Int(newValue)) }
+            levelEmitter = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
         }
     }
 
@@ -292,16 +360,17 @@ struct BubbleView: View {
         HStack(spacing: 8) {
             TextField("Ask a follow-up…", text: $question)
                 .textFieldStyle(.plain)
+                .font(.system(size: bodySize))
                 .focused($askFocused)
                 .onSubmit(submit)
                 .disabled(model.streaming)
             Button(action: submit) {
-                Image(systemName: "arrow.up.circle.fill").font(.title3)
+                Image(systemName: "arrow.up.circle.fill").font(.system(size: 22))
             }
             .buttonStyle(.plain)
             .disabled(model.streaming || question.trimmingCharacters(in: .whitespaces).isEmpty)
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 9)
         .background(Color.primary.opacity(0.06), in: Capsule())
     }
 
@@ -316,11 +385,11 @@ struct BubbleView: View {
 struct GlassBackground: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: .rect(cornerRadius: 26))
+            content.glassEffect(.regular, in: .rect(cornerRadius: 28))
         } else {
             content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26))
-                .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28))
+                .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
         }
     }
 }
@@ -336,15 +405,19 @@ final class BubbleController {
     let model = BubbleModel()
     let panel: BubblePanel
     let hosting: NSHostingView<BubbleView>
+    let debug = ProcessInfo.processInfo.environment["EXPLAIN_BUBBLE_DEBUG"] != nil
     private var monitors: [Any] = []
     private var closed = false
     private var shownAt = Date.distantFuture
-    private let debug = ProcessInfo.processInfo.environment["EXPLAIN_BUBBLE_DEBUG"] != nil
+    private var anchorTop: CGFloat = 0
+    private var anchorLeft: CGFloat = 0
 
     init() {
         hosting = NSHostingView(rootView: BubbleView(model: model))
+        // The window is sized from the height the SwiftUI view reports; keep AppKit's constraints out of it.
+        hosting.sizingOptions = []
         panel = BubblePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: bubbleWidth, height: 200),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -359,8 +432,13 @@ final class BubbleController {
         panel.isReleasedWhenClosed = false
         panel.contentView = hosting
 
-        model.onLayoutChange = { [weak self] in self?.resize() }
+        model.onRelayout = { [weak self] in self?.relayout() }
+        model.onHeightChange = { [weak self] h in
+            // Preference changes arrive mid-layout; resize the window on the next runloop turn.
+            DispatchQueue.main.async { self?.resize(toHeight: h) }
+        }
         model.onClose = { [weak self] in self?.close() }
+        model.onLevelChange = { level in emit(["type": "level", "value": level]) }
         model.onAsk = { [weak self] q in
             self?.model.handle(["type": "user", "text": q])
             self?.model.streaming = true
@@ -376,12 +454,19 @@ final class BubbleController {
         // click that was already in flight when the bubble appeared does not dismiss it).
         monitors.append(NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, Date().timeIntervalSince(self.shownAt) > 0.6 else { return }
+            if ProcessInfo.processInfo.environment["EXPLAIN_BUBBLE_NO_AUTOCLOSE"] != nil { return }
             if !self.panel.frame.contains(NSEvent.mouseLocation) { self.close() }
         } as Any)
     }
 
     func show() {
-        placeNearMouse()
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        model.maxBodyHeight = max(240, min(680, visible.height * 0.6))
+        anchorLeft = mouse.x + 16
+        anchorTop = mouse.y - 16
+        panel.setFrame(clamped(NSRect(x: anchorLeft, y: anchorTop - 200, width: bubbleWidth, height: 200)), display: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         shownAt = Date()
@@ -389,47 +474,46 @@ final class BubbleController {
             ctx.duration = 0.18
             panel.animator().alphaValue = 1
         }
+    }
+
+    /// Re-applies the current height (used after model changes that do not alter the view's height).
+    func relayout() {
+        guard !closed, lastHeight > 0 else { return }
+        resize(toHeight: lastHeight)
+    }
+
+    private var lastHeight: CGFloat = 0
+
+    /// Sizes and positions the window to the height the SwiftUI view reported.
+    func resize(toHeight height: CGFloat) {
+        guard !closed, height > 0 else { return }
+        lastHeight = height
         if debug {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self else { return }
-                let s = "debug: visible=\(self.panel.isVisible) onScreen=\(self.panel.isOnActiveSpace) frame=\(self.panel.frame) screen=\(String(describing: self.panel.screen?.frame))\n"
-                FileHandle.standardError.write(s.data(using: .utf8)!)
-            }
+            FileHandle.standardError.write("debug: content \(model.contentHeight) -> body \(model.bodyHeight), window height \(height)\n".data(using: .utf8)!)
+        }
+        let frame = clamped(NSRect(x: anchorLeft, y: anchorTop - height, width: bubbleWidth, height: height))
+        if frame != panel.frame {
+            panel.setFrame(frame, display: true, animate: false)
         }
     }
 
-    private func placeNearMouse() {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = hosting.fittingSize
-        var origin = NSPoint(x: mouse.x + 14, y: mouse.y - 14 - size.height)
-        if origin.x + size.width > visible.maxX { origin.x = max(visible.minX, mouse.x - size.width - 14) }
-        if origin.y < visible.minY { origin.y = min(visible.maxY - size.height, mouse.y + 14) }
-        origin.y = max(visible.minY, origin.y)
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
-    }
-
-    func resize() {
-        guard !closed else { return }
-        let size = hosting.fittingSize
-        guard size.height > 0, abs(size.height - panel.frame.height) > 0.5 || abs(size.width - panel.frame.width) > 0.5 else { return }
-        var frame = panel.frame
-        let top = frame.maxY
-        frame.size = size
-        frame.origin.y = top - size.height
-        if let screen = panel.screen ?? NSScreen.main {
-            let visible = screen.visibleFrame
-            if frame.minY < visible.minY { frame.origin.y = visible.minY }
-            if frame.maxY > visible.maxY { frame.origin.y = visible.maxY - frame.height }
-        }
-        panel.setFrame(frame, display: true, animate: false)
+    /// Keeps the bubble anchored at its top-left corner and inside the visible screen.
+    private func clamped(_ proposed: NSRect) -> NSRect {
+        var frame = proposed
+        let anchor = NSPoint(x: anchorLeft, y: anchorTop)
+        let screen = NSScreen.screens.first { NSMouseInRect(anchor, $0.frame, false) } ?? panel.screen ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return frame }
+        if frame.maxX > visible.maxX { frame.origin.x = max(visible.minX, anchorLeft - frame.width - 32) }
+        if frame.origin.x < visible.minX { frame.origin.x = visible.minX }
+        if frame.minY < visible.minY { frame.origin.y = visible.minY }
+        if frame.maxY > visible.maxY { frame.origin.y = visible.maxY - frame.height }
+        return frame
     }
 
     func close() {
         guard !closed else { return }
-        if ProcessInfo.processInfo.environment["EXPLAIN_BUBBLE_DEBUG"] != nil {
-            FileHandle.standardError.write(("close() called from:\n" + Thread.callStackSymbols.joined(separator: "\n") + "\n").data(using: .utf8)!)
+        if debug {
+            FileHandle.standardError.write(("close() called from:\n" + Thread.callStackSymbols.prefix(4).joined(separator: "\n") + "\n").data(using: .utf8)!)
         }
         closed = true
         for m in monitors { NSEvent.removeMonitor(m) }
@@ -460,9 +544,8 @@ func startReadingStdin(_ controller: BubbleController) {
             DispatchQueue.main.async { controller.model.handle(obj) }
         }
         DispatchQueue.main.async {
-            controller.model.hostAlive = false
             controller.model.streaming = false
-            controller.model.onLayoutChange?()
+            controller.model.hostAlive = false
         }
     }
 }
