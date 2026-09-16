@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs a macOS Quick Action so "Explain This" works in ANY app:
 # iTerm, Terminal.app, Warp, Ghostty, a browser, Xcode, Slack... Select text,
-# press the hotkey, and the explanation opens in your browser.
+# press the hotkey, and a floating glass bubble explains it.
 #
 # Usage:  ./system/install-macos-quick-action.sh
 # Then:   System Settings > Keyboard > Keyboard Shortcuts > Services > Text >
@@ -21,15 +21,18 @@ if [[ -z "$NODE" ]]; then
   echo "node was not found on PATH. Install Node.js first." >&2
   exit 1
 fi
-if [[ ! -f "$CLI" ]]; then
-  echo "dist/cli.js is missing. Run 'npm install && npm run build' in $REPO first." >&2
+if [[ ! -f "$CLI" || ! -x "$REPO/bin/ExplainBubble" ]]; then
+  echo "dist/cli.js or bin/ExplainBubble is missing. Run 'npm install && npm run build:all' in $REPO first." >&2
   exit 1
 fi
 
 # The shell script the Quick Action runs. Selected text arrives on stdin.
 # Automator runs with a minimal environment, so node and the CLI are referenced by absolute path.
+# The CLI is detached so the Quick Action returns immediately while the bubble stays open.
 SCRIPT="export PATH=\"$(dirname "$NODE"):/usr/bin:/bin:/usr/sbin:/sbin\"
-out=\$(\"$NODE\" \"$CLI\" --open --source \"selected text\" 2>&1) || osascript -e \"display notification \\\"\${out//\\\"/}\\\" with title \\\"Explain This failed\\\"\""
+tmp=\$(mktemp)
+cat > \"\$tmp\"
+nohup /bin/bash -c '\"$NODE\" \"$CLI\" --bubble --source \"selected text\" < \"\$1\"; rm -f \"\$1\"' _ \"\$tmp\" >/dev/null 2>&1 &"
 
 xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 SCRIPT_XML="$(printf '%s' "$SCRIPT" | xml_escape)"
@@ -285,7 +288,7 @@ plutil -lint "$DEST/Contents/Info.plist" "$DEST/Contents/document.wflow" >/dev/n
 echo "Installed: $DEST"
 echo
 echo "Next: System Settings > Keyboard > Keyboard Shortcuts > Services > Text > \"$NAME\" and assign a hotkey."
-echo "Then, in any app, select text and press it. The explanation opens in your browser."
+echo "Then, in any app, select text and press it. A glass bubble pops up with the explanation."
 echo
 if [[ ! -f "$HOME/.config/explain-this/api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "Reminder: the action needs an API key at ~/.config/explain-this/api-key"

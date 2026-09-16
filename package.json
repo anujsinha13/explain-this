@@ -1,7 +1,7 @@
 {
   "name": "explain-this",
   "displayName": "Explain This",
-  "description": "Select code or terminal output anywhere, press Ctrl+Shift+E, and get an inline explanation from Claude. Works in VS Code, Cursor, Windsurf, and alongside any coding agent.",
+  "description": "Select code or terminal output anywhere, press Ctrl+Shift+E, and a floating glass bubble explains it in plain English. Works in VS Code, Cursor, Windsurf, and alongside any coding agent.",
   "version": "0.1.0",
   "publisher": "anujsinha13",
   "license": "MIT",
@@ -41,6 +41,11 @@
       {
         "command": "explainThis.explainInPanel",
         "title": "Explain Selection in Side Panel",
+        "category": "Explain This"
+      },
+      {
+        "command": "explainThis.explainInline",
+        "title": "Explain Selection as Inline Card",
         "category": "Explain This"
       },
       {
@@ -148,15 +153,17 @@
         "explainThis.display": {
           "type": "string",
           "enum": [
+            "bubble",
             "inline",
             "panel"
           ],
           "enumDescriptions": [
+            "A floating Liquid Glass bubble at the mouse cursor, on top of everything (macOS; falls back to inline elsewhere).",
             "A card directly under the selected code (comment thread).",
             "The Explain This side panel."
           ],
-          "default": "inline",
-          "description": "Where editor explanations appear. Terminal explanations always use the side panel."
+          "default": "bubble",
+          "description": "Where explanations appear. Terminal explanations use the bubble on macOS and the side panel elsewhere."
         },
         "explainThis.model": {
           "type": "string",
@@ -190,12 +197,19 @@
         "explainThis.style": {
           "type": "string",
           "enum": [
+            "plain",
             "concise",
             "detailed",
             "eli5"
           ],
-          "default": "concise",
-          "description": "How the explanation is written. 'concise' is a short digest, 'detailed' walks through the logic, 'eli5' assumes no prior knowledge."
+          "enumDescriptions": [
+            "Plain English for a smart non-programmer. Short, no jargon.",
+            "A short technical digest for developers.",
+            "Step-by-step walkthrough with edge cases.",
+            "Assumes no programming knowledge at all, with analogies."
+          ],
+          "default": "plain",
+          "description": "How the explanation is written."
         },
         "explainThis.extraInstructions": {
           "type": "string",
@@ -207,6 +221,8 @@
   },
   "scripts": {
     "build": "node esbuild.mjs",
+    "build:bubble": "swift build -c release --package-path bubble && mkdir -p bin && cp bubble/.build/release/ExplainBubble bin/ExplainBubble",
+    "build:all": "npm run build && npm run build:bubble",
     "watch": "node esbuild.mjs --watch",
     "check": "tsc --noEmit",
     "vscode:prepublish": "npm run check && npm run build -- --production",

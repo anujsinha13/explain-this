@@ -9,3 +9,4 @@ tsconfig.json
 dist/cli.js
 dist/cli.js.map
 system/**
+bubble/**

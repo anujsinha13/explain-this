@@ -5,14 +5,19 @@ import { buildSystemPrompt, Style } from "./prompt";
 import { fromEditor, fromTerminal, EditorSelection } from "./editorContext";
 import { InlineThreads } from "./inline";
 import { ExplainPanel } from "./panel";
+import { BubbleSurface, bubbleAvailable } from "./bubble";
 import { Surface, StreamingTarget } from "./surface";
 
 let inline: InlineThreads;
 let panel: ExplainPanel;
+let bubble: BubbleSurface | undefined;
+let bubbleBinary: string;
 
 export function activate(context: vscode.ExtensionContext): void {
   inline = new InlineThreads();
   panel = new ExplainPanel(context.extensionUri);
+  bubbleBinary = context.asAbsolutePath("bin/ExplainBubble");
+  context.subscriptions.push({ dispose: () => bubble?.close() });
   panel.setAskHandler((surface, text) => void followUp(context, surface, text));
   context.subscriptions.push(inline, panel);
 
@@ -20,6 +25,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("explainThis.explain", () => explainEditor(context)),
     vscode.commands.registerCommand("explainThis.explainTerminal", () => explainTerminal(context)),
     vscode.commands.registerCommand("explainThis.explainInPanel", () => explainEditor(context, "panel")),
+    vscode.commands.registerCommand("explainThis.explainInline", () => explainEditor(context, "inline")),
     vscode.commands.registerCommand("explainThis.reply", (reply: vscode.CommentReply) => {
       const surface = inline.get(reply.thread);
       if (surface) {
@@ -61,8 +67,10 @@ interface Settings {
   maxWholeFileChars: number;
   style: Style;
   extraInstructions: string;
-  display: "inline" | "panel";
+  display: Display;
 }
+
+type Display = "bubble" | "inline" | "panel";
 
 function readSettings(): Settings {
   const cfg = vscode.workspace.getConfiguration("explainThis");
@@ -71,14 +79,28 @@ function readSettings(): Settings {
     effort: cfg.get<Effort>("effort", "medium"),
     contextLines: cfg.get<number>("contextLines", 60),
     maxWholeFileChars: cfg.get<number>("maxWholeFileChars", 24000),
-    style: cfg.get<Style>("style", "concise"),
+    style: cfg.get<Style>("style", "plain"),
     extraInstructions: cfg.get<string>("extraInstructions", ""),
-    display: cfg.get<"inline" | "panel">("display", "inline"),
+    display: cfg.get<Display>("display", "bubble"),
   };
 }
 
+/** Opens a floating bubble for this selection, replacing any bubble already open. */
+function openBubble(context: vscode.ExtensionContext, label: string, selected: string): BubbleSurface {
+  bubble?.close();
+  const surface = new BubbleSurface(bubbleBinary, label, selected, (event) => {
+    if (event.type === "ask") {
+      void followUp(context, surface, event.text);
+    } else if (bubble === surface) {
+      bubble = undefined;
+    }
+  });
+  bubble = surface;
+  return surface;
+}
+
 /** Explains the editor selection. Falls back to the terminal when no editor is active. */
-async function explainEditor(context: vscode.ExtensionContext, forceDisplay?: "inline" | "panel"): Promise<void> {
+async function explainEditor(context: vscode.ExtensionContext, forceDisplay?: Display): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     if (vscode.window.activeTerminal) {
@@ -100,17 +122,22 @@ async function explainEditor(context: vscode.ExtensionContext, forceDisplay?: "i
 
   const settings = readSettings();
   const sel = fromEditor(editor.document, range, settings);
-  const display = forceDisplay ?? settings.display;
+  let display = forceDisplay ?? settings.display;
+  if (display === "bubble" && !bubbleAvailable(bubbleBinary)) {
+    display = "inline"; // the native bubble is macOS-only
+  }
 
   const surface: Surface =
-    display === "panel"
-      ? panel.show(sel.label, sel.input.selected)
-      : inline.create(editor.document.uri, range, sel.label);
+    display === "bubble"
+      ? openBubble(context, sel.label, sel.input.selected)
+      : display === "panel"
+        ? panel.show(sel.label, sel.input.selected)
+        : inline.create(editor.document.uri, range, sel.label);
 
   await start(context, surface, sel, settings);
 }
 
-/** Explains the text selected in the integrated terminal, shown in the side panel. */
+/** Explains the text selected in the integrated terminal: bubble on macOS, otherwise the side panel. */
 async function explainTerminal(context: vscode.ExtensionContext): Promise<void> {
   const sel = await fromTerminal();
   if (!sel) {
@@ -118,7 +145,10 @@ async function explainTerminal(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   const settings = readSettings();
-  const surface = panel.show(sel.label, sel.input.selected);
+  const surface: Surface =
+    settings.display === "bubble" && bubbleAvailable(bubbleBinary)
+      ? openBubble(context, sel.label, sel.input.selected)
+      : panel.show(sel.label, sel.input.selected);
   await start(context, surface, sel, settings);
 }
 

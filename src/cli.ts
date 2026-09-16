@@ -5,6 +5,7 @@
  *   explain-this                 # explains the clipboard contents
  *   explain-this < file.ts       # explains stdin
  *   explain-this --html          # writes a rendered HTML page to a temp file and prints its path
+ *   explain-this --bubble        # shows a floating Liquid Glass bubble at the cursor (macOS)
  *   explain-this --style eli5 --effort low --model claude-opus-5
  *
  * API key: ANTHROPIC_API_KEY, or ~/.config/explain-this/api-key, or an `ant auth login` profile.
@@ -17,10 +18,12 @@ import { join } from "node:path";
 import { marked } from "marked";
 import { streamExplanation, describeError, isMissingCredentials, Effort } from "./client";
 import { buildSystemPrompt, buildUserMessage, Style } from "./prompt";
+import { BubbleSurface, bubbleAvailable } from "./bubble";
 
 interface Args {
   html: boolean;
   open: boolean;
+  bubble: boolean;
   style: Style;
   effort: Effort;
   model: string;
@@ -28,12 +31,13 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { html: false, open: false, style: "concise", effort: "medium", model: "claude-opus-5", source: "clipboard" };
+  const args: Args = { html: false, open: false, bubble: false, style: "plain", effort: "medium", model: "claude-opus-5", source: "clipboard" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i] ?? "";
     if (a === "--html") args.html = true;
     else if (a === "--open") { args.html = true; args.open = true; }
+    else if (a === "--bubble") args.bubble = true;
     else if (a === "--style") args.style = next() as Style;
     else if (a === "--effort") args.effort = next() as Effort;
     else if (a === "--model") args.model = next();
@@ -50,11 +54,12 @@ function usage(): string {
   return [
     "explain-this: explain selected code or terminal output with Claude.",
     "",
-    "  explain-this [--style concise|detailed|eli5] [--effort low|medium|high|xhigh|max]",
-    "               [--model ID] [--source LABEL] [--html] [--open]",
+    "  explain-this [--style plain|concise|detailed|eli5] [--effort low|medium|high|xhigh|max]",
+    "               [--model ID] [--source LABEL] [--html] [--open] [--bubble]",
     "",
     "Reads stdin if piped, otherwise the clipboard. --html renders Markdown to a temp",
     "HTML file and prints its path; --open also opens it in the default browser.",
+    "--bubble shows a floating glass bubble at the mouse cursor with follow-ups (macOS).",
     "",
   ].join("\n");
 }
@@ -125,13 +130,24 @@ async function main(): Promise<void> {
   const userMessage = buildUserMessage({ selected: text, source: label, language: "unknown (selected outside the editor)" });
 
   const client = makeClient();
+  const system = buildSystemPrompt(args.style, "");
+
+  if (args.bubble) {
+    const binary = join(__dirname, "..", "bin", "ExplainBubble");
+    if (!bubbleAvailable(binary)) {
+      process.stderr.write("The bubble is macOS-only and needs bin/ExplainBubble (run: npm run build:bubble).\n");
+      process.exit(5);
+    }
+    await runBubble(client, binary, args, label, text, userMessage, system);
+    return;
+  }
 
   try {
     const result = await streamExplanation({
       client,
       model: args.model,
       effort: args.effort,
-      system: buildSystemPrompt(args.style, ""),
+      system,
       messages: [{ role: "user", content: userMessage }],
       signal: new AbortController().signal,
       onText: (delta) => {
@@ -158,13 +174,79 @@ async function main(): Promise<void> {
       process.stdout.write("\n");
     }
   } catch (err) {
-    if (isMissingCredentials(err)) {
-      process.stderr.write("No Anthropic credentials. Set ANTHROPIC_API_KEY or write your key to ~/.config/explain-this/api-key.\n");
-      process.exit(3);
-    }
-    process.stderr.write(`${describeError(err).message}\n`);
-    process.exit(1);
+    exitWithError(err);
   }
+}
+
+function exitWithError(err: unknown): never {
+  if (isMissingCredentials(err)) {
+    process.stderr.write("No Anthropic credentials. Set ANTHROPIC_API_KEY or write your key to ~/.config/explain-this/api-key.\n");
+    process.exit(3);
+  }
+  process.stderr.write(`${describeError(err).message}\n`);
+  process.exit(1);
+}
+
+/** Bubble mode: stream into the floating window and keep answering follow-ups until it closes. */
+async function runBubble(
+  client: Anthropic,
+  binary: string,
+  args: Args,
+  label: string,
+  selected: string,
+  userMessage: string,
+  system: string,
+): Promise<void> {
+  let queue: Promise<void> = Promise.resolve();
+  let resolveClosed: () => void = () => undefined;
+  const closed = new Promise<void>((r) => (resolveClosed = r));
+
+  const surface = new BubbleSurface(binary, label, selected, (event) => {
+    if (event.type === "closed") {
+      resolveClosed();
+    } else {
+      queue = queue.then(() => turn(event.text));
+    }
+  });
+
+  const turn = async (question?: string): Promise<void> => {
+    if (!surface.isOpen) return;
+    if (question) surface.conversation.history.push({ role: "user", content: question });
+    const abort = new AbortController();
+    surface.conversation.abort = abort;
+    const target = surface.beginAssistantTurn();
+    try {
+      const result = await streamExplanation({
+        client,
+        model: args.model,
+        effort: args.effort,
+        system,
+        messages: surface.conversation.history,
+        signal: abort.signal,
+        onText: (delta) => target.append(delta),
+      });
+      if (result.stopReason === "refusal") {
+        surface.conversation.history.pop();
+        target.fail(`Claude declined to answer${result.refusalExplanation ? `: ${result.refusalExplanation}` : "."}`);
+        return;
+      }
+      const text = result.text.trim() || "(empty response)";
+      surface.conversation.history.push({ role: "assistant", content: text });
+      surface.conversation.lastExplanation = text;
+      target.finish(text, result.servedBy !== args.model ? `via ${result.servedBy}` : undefined);
+    } catch (err) {
+      surface.conversation.history.pop();
+      if (abort.signal.aborted) return;
+      const info = describeError(err);
+      target.fail(info.missingKey ? "No Anthropic API key. Put it in ~/.config/explain-this/api-key." : info.message);
+    } finally {
+      surface.conversation.abort = undefined;
+    }
+  };
+
+  surface.conversation.history.push({ role: "user", content: userMessage });
+  queue = turn();
+  await closed;
 }
 
 void main();

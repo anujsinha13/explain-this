@@ -1,6 +1,8 @@
-export type Style = "concise" | "detailed" | "eli5";
+export type Style = "plain" | "concise" | "detailed" | "eli5";
 
 const STYLE_GUIDES: Record<Style, string> = {
+  plain:
+    "Explain in plain English, the way you would to a smart friend who does not write code. Lead with what it does and why it matters, in everyday words. Use short sentences. Avoid jargon; if a technical word is unavoidable, say what it means in a few words the first time. A quick everyday analogy is welcome when it makes things click. Mention a gotcha only if it is important. Keep it under 120 words: one or two short paragraphs, or two or three bullets if there are separate points. Do not use inline code formatting except for a name the reader has to recognise.",
   concise:
     "Keep it short: a one-sentence summary, then 2-5 bullets on how it works and anything surprising. Aim for under 150 words unless the material is genuinely complex.",
   detailed:

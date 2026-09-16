@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.vsix
 .DS_Store
+bin/
+bubble/.build/
