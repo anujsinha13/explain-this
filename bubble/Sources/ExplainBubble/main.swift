@@ -19,9 +19,19 @@ import SwiftUI
 
 // MARK: - Layout constants
 
-let bubbleWidth: CGFloat = 780
-let bubblePadding: CGFloat = 24
-let bodySize: CGFloat = 19
+/// User zoom (⌘+ / ⌘− / ⌘0 while the bubble is open), remembered across launches.
+var uiScale: CGFloat = {
+    let saved = UserDefaults.standard.double(forKey: "uiScale")
+    return saved > 0 ? CGFloat(saved) : 1
+}()
+let uiScaleRange: ClosedRange<CGFloat> = 0.7...1.8
+
+var bubbleWidth: CGFloat { pt(700) }
+var bubblePadding: CGFloat { pt(22) }
+var bodySize: CGFloat { pt(17) }
+
+/// Scales a design-size point value by the current zoom.
+func pt(_ v: CGFloat) -> CGFloat { (v * uiScale).rounded() }
 
 // MARK: - Model
 
@@ -44,8 +54,9 @@ final class BubbleModel: ObservableObject {
     @Published var level: Double = 3
     /// Natural height of the scrolling body, reported by the rendered view itself.
     @Published var contentHeight: CGFloat = 28
-    /// Tallest the scrolling body may get; computed from the screen at launch.
-    @Published var maxBodyHeight: CGFloat = 560
+    /// Tallest the scrolling body may get: about four and a half lines of body text, so a
+    /// long answer stays compact and the rest is a scroll away.
+    var maxBodyHeight: CGFloat { (bodySize * 1.2 + 3) * 4.5 }
 
     var bodyHeight: CGFloat { min(max(contentHeight, 28), maxBodyHeight) }
 
@@ -240,7 +251,7 @@ struct BodyContent: View {
         VStack(alignment: .leading, spacing: 14) {
             if model.showSelection {
                 Text(model.selected)
-                    .font(.system(size: 15, design: .monospaced))
+                    .font(.system(size: pt(14), design: .monospaced))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
@@ -272,7 +283,7 @@ struct BodyContent: View {
                 MarkdownText(text: turn.text, streaming: model.streaming && turn.id == model.turns.last?.id)
                     .foregroundStyle(turn.isError ? Color.red : Color.primary)
                 if let label = turn.label, !label.isEmpty {
-                    Text(label).font(.system(size: 12)).foregroundStyle(.tertiary)
+                    Text(label).font(.system(size: pt(12))).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -298,6 +309,7 @@ struct BubbleView: View {
                 }
                 .frame(height: model.bodyHeight)
                 .onChange(of: model.contentHeight) { _, _ in
+                    guard model.turns.count > 1 else { return }
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
@@ -313,12 +325,12 @@ struct BubbleView: View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.secondary)
             Text(model.source.isEmpty ? "Explain This" : model.source)
-                .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                .font(.system(size: pt(13))).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             Spacer()
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { model.showSelection.toggle() }
             } label: {
-                Image(systemName: model.showSelection ? "eye.slash" : "eye").font(.system(size: 15))
+                Image(systemName: model.showSelection ? "eye.slash" : "eye").font(.system(size: pt(15)))
             }
             .buttonStyle(.plain).foregroundStyle(.secondary).help("Show the selected text")
             Button {
@@ -326,24 +338,24 @@ struct BubbleView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(t, forType: .string)
                 }
-            } label: { Image(systemName: "doc.on.doc").font(.system(size: 15)) }
+            } label: { Image(systemName: "doc.on.doc").font(.system(size: pt(15))) }
             .buttonStyle(.plain).foregroundStyle(.secondary).help("Copy explanation")
-            Button { model.onClose?() } label: { Image(systemName: "xmark").font(.system(size: 15, weight: .medium)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Close (Esc)")
+            Button { model.onClose?() } label: { Image(systemName: "xmark").font(.system(size: pt(15), weight: .medium)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary).help("Close (Esc) · zoom with ⌘+ / ⌘−")
                 .keyboardShortcut(.cancelAction)
         }
     }
 
     private var levelRow: some View {
         HStack(spacing: 10) {
-            Text("Plain").font(.system(size: 14)).foregroundStyle(.secondary)
+            Text("Plain").font(.system(size: pt(13))).foregroundStyle(.secondary)
             Slider(value: $model.level, in: 1...10, step: 1)
-                .controlSize(.regular)
-            Text("Technical").font(.system(size: 14)).foregroundStyle(.secondary)
+                .controlSize(.small)
+            Text("Technical").font(.system(size: pt(13))).foregroundStyle(.secondary)
             Text("\(Int(model.level))")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.system(size: pt(13), weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .frame(width: 26)
+                .frame(width: pt(26))
                 .padding(.vertical, 2)
                 .background(Color.primary.opacity(0.08), in: Capsule())
         }
@@ -365,7 +377,7 @@ struct BubbleView: View {
                 .onSubmit(submit)
                 .disabled(model.streaming)
             Button(action: submit) {
-                Image(systemName: "arrow.up.circle.fill").font(.system(size: 22))
+                Image(systemName: "arrow.up.circle.fill").font(.system(size: pt(22)))
             }
             .buttonStyle(.plain)
             .disabled(model.streaming || question.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -445,9 +457,18 @@ final class BubbleController {
             emit(["type": "ask", "text": q])
         }
 
-        // Esc closes when the bubble has keyboard focus.
+        // Esc closes when the bubble has keyboard focus; ⌘+ / ⌘− / ⌘0 zoom the bubble.
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.close(); return nil }
+            guard let self else { return event }
+            if event.keyCode == 53 { self.close(); return nil }
+            if event.modifierFlags.contains(.command) {
+                switch event.charactersIgnoringModifiers {
+                case "=", "+": self.zoom(to: uiScale + 0.1); return nil
+                case "-", "_": self.zoom(to: uiScale - 0.1); return nil
+                case "0": self.zoom(to: 1); return nil
+                default: break
+                }
+            }
             return event
         } as Any)
         // A click anywhere outside the bubble closes it (after a short grace period so a
@@ -459,11 +480,17 @@ final class BubbleController {
         } as Any)
     }
 
+    /// Changes the zoom, persists it, and rebuilds the view tree at the new size.
+    func zoom(to scale: CGFloat) {
+        let clamped = min(max(scale, uiScaleRange.lowerBound), uiScaleRange.upperBound)
+        guard clamped != uiScale else { return }
+        uiScale = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: "uiScale")
+        hosting.rootView = BubbleView(model: model)
+    }
+
     func show() {
         let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        model.maxBodyHeight = max(300, min(900, visible.height * 0.7))
         anchorLeft = mouse.x + 16
         anchorTop = mouse.y - 16
         panel.setFrame(clamped(NSRect(x: anchorLeft, y: anchorTop - 200, width: bubbleWidth, height: 200)), display: false)

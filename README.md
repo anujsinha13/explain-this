@@ -13,7 +13,7 @@ It is agent-agnostic. It does not plug into any particular AI tool; it works on 
 | **Any macOS app** (iTerm, Terminal.app, Warp, Ghostty, browsers, Xcode…) | A system-wide Quick Action sends the selected text to the CLI, which pops the same bubble. |
 | **Your shell** | `explain-this` explains the clipboard or stdin. Pipe anything into it, or add `--bubble`. |
 
-The bubble is a native macOS window using the system Liquid Glass material (macOS 26; a frosted material on older versions). It floats above everything, follows your mouse position, streams as Claude writes, and has a follow-up box, copy button, and a toggle to peek at the selected text. Esc, the close button, or a click anywhere outside dismisses it. On Linux and Windows the editor falls back to inline cards and the side panel.
+The bubble is a native macOS window using the system Liquid Glass material (macOS 26; a frosted material on older versions). It floats above everything, follows your mouse position, streams as Claude writes, and has a follow-up box, copy button, and a toggle to peek at the selected text. It shows about four lines and scrolls for the rest. Press ⌘+ / ⌘− to make the whole bubble bigger or smaller (⌘0 resets); the size is remembered. Esc, the close button, or a click anywhere outside dismisses it. On Linux and Windows the editor falls back to inline cards and the side panel.
 
 ## Editor extension
 
