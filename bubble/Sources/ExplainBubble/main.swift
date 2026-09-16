@@ -19,9 +19,9 @@ import SwiftUI
 
 // MARK: - Layout constants
 
-let bubbleWidth: CGFloat = 640
-let bubblePadding: CGFloat = 20
-let bodySize: CGFloat = 16
+let bubbleWidth: CGFloat = 780
+let bubblePadding: CGFloat = 24
+let bodySize: CGFloat = 19
 
 // MARK: - Model
 
@@ -240,7 +240,7 @@ struct BodyContent: View {
         VStack(alignment: .leading, spacing: 14) {
             if model.showSelection {
                 Text(model.selected)
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(.system(size: 15, design: .monospaced))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
@@ -272,7 +272,7 @@ struct BodyContent: View {
                 MarkdownText(text: turn.text, streaming: model.streaming && turn.id == model.turns.last?.id)
                     .foregroundStyle(turn.isError ? Color.red : Color.primary)
                 if let label = turn.label, !label.isEmpty {
-                    Text(label).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Text(label).font(.system(size: 12)).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -313,7 +313,7 @@ struct BubbleView: View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.secondary)
             Text(model.source.isEmpty ? "Explain This" : model.source)
-                .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             Spacer()
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { model.showSelection.toggle() }
@@ -336,14 +336,14 @@ struct BubbleView: View {
 
     private var levelRow: some View {
         HStack(spacing: 10) {
-            Text("Plain").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Plain").font(.system(size: 14)).foregroundStyle(.secondary)
             Slider(value: $model.level, in: 1...10, step: 1)
-                .controlSize(.small)
-            Text("Technical").font(.system(size: 12)).foregroundStyle(.secondary)
+                .controlSize(.regular)
+            Text("Technical").font(.system(size: 14)).foregroundStyle(.secondary)
             Text("\(Int(model.level))")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .frame(width: 22)
+                .frame(width: 26)
                 .padding(.vertical, 2)
                 .background(Color.primary.opacity(0.08), in: Capsule())
         }
@@ -463,7 +463,7 @@ final class BubbleController {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        model.maxBodyHeight = max(240, min(680, visible.height * 0.6))
+        model.maxBodyHeight = max(300, min(900, visible.height * 0.7))
         anchorLeft = mouse.x + 16
         anchorTop = mouse.y - 16
         panel.setFrame(clamped(NSRect(x: anchorLeft, y: anchorTop - 200, width: bubbleWidth, height: 200)), display: false)
